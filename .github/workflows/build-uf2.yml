@@ -23,7 +23,7 @@ jobs:
         uses: spark404/picotool_action@v3
         with:
           command: info
-          arguments: build/pico-stepper-dds.uf2
+          arguments: build/pico-boat-steering.uf2
       - name: Archive
         uses: actions/upload-artifact@v2
         with:
