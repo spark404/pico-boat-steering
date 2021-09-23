@@ -1,0 +1,31 @@
+name: Build UF2
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      PICO_SDK_FETCH_FROM_GIT: on    
+    steps:
+      - name: Cleanup
+        uses: actions/checkout@v2
+      - name: Install Toolchain
+        run: sudo apt-get install -y ninja-build gcc-arm-none-eabi
+      - name: Generate Buildfiles
+        run: |
+          mkdir build
+          cd build
+          cmake .. -G Ninja
+      - name: Execute Ninja build    
+        run: |
+          cd build
+          ninja
+      - name: Execute picotool
+        uses: spark404/picotool_action@v3
+        with:
+          command: info
+          arguments: build/pico-stepper-dds.uf2
+      - name: Archive
+        uses: actions/upload-artifact@v2
+        with:
+          name: firmware
+          path: build/*.uf2    
