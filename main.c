@@ -6,15 +6,20 @@
 
 #include "hardware/pwm.h"
 
-volatile uint64_t steer_high = 0;
-volatile int32_t steer_delta = 0;
-volatile uint64_t throttle_high = 0;
-volatile int32_t throttle_delta = 0;
+volatile uint64_t steer_pulse_start = 0;
+volatile int32_t steer_pulse_us = 0;
+volatile uint64_t throttle_pulse_start = 0;
+volatile int32_t throttle_pulse_us = 0;
 
-uint32_t left_speed;
-uint32_t right_speed;
-uint8_t left_direction;
-uint8_t right_direction;
+typedef struct {
+    uint32_t speed;
+    uint8_t direction;
+} track_control_t;
+
+typedef struct {
+    track_control_t left;
+    track_control_t right;
+} control_t;
 
 long constrain(long x, long min, long max);
 long map(long x, long in_min, long in_max, long out_min, long out_max);
@@ -27,10 +32,11 @@ long deadzone(long x, long center, long width);
 #define GPIO_PIN_RIGHT_PWM 12
 #define GPIO_PIN_RIGHT_DIR 13
 
-#define DELTA_MIN 1100
-#define DELTA_MAX 1900
-#define DELTA_NEUTRAL 1500
-#define DELTA_DEADZONE 5
+// Typical settings for Spektrum servo pulse width in microseconds
+#define MIN_US 1100
+#define MAX_US 1900
+#define NEUTRAL_US 1500
+#define DEADZONE_US 5
 
 /**
  * Callback for GPIO pin events. On rising edge the current time
@@ -43,15 +49,15 @@ long deadzone(long x, long center, long width);
 void gpio_callback(uint gpio, uint32_t event) {
     if (gpio == GPIO_THROTTLE) {
         if (event == GPIO_IRQ_EDGE_RISE) {
-            throttle_high = time_us_64();
+            throttle_pulse_start = time_us_64();
         } else {
-            throttle_delta = (int32_t)(time_us_64() - throttle_high);
+            throttle_pulse_us = (int32_t)(time_us_64() - throttle_pulse_start);
         }
     } else {
         if (event == GPIO_IRQ_EDGE_RISE) {
-            steer_high = time_us_64();
+            steer_pulse_start = time_us_64();
         } else {
-            steer_delta = (int32_t)(time_us_64() - steer_high);
+            steer_pulse_us = (int32_t)(time_us_64() - steer_pulse_start);
         }
     }
 }
@@ -61,15 +67,15 @@ void gpio_callback(uint gpio, uint32_t event) {
  * the Spektrum receiver and mixes the signal into target speed and
  * directions for the left and right engine.
  */
-void mixer() {
-    int throttle = constrain(throttle_delta, DELTA_MIN, DELTA_MAX);
-    int steer = constrain(steer_delta, DELTA_MIN, DELTA_MAX);
+void mixer(int32_t throttle_us, int32_t steer_us, control_t *control) {
+    int throttle = constrain(throttle_us, MIN_US, MAX_US);
+    int steer = constrain(steer_us, MIN_US, MAX_US);
 
-    throttle = deadzone(throttle, DELTA_NEUTRAL, DELTA_DEADZONE);
-    steer = deadzone(steer, DELTA_NEUTRAL, DELTA_DEADZONE);
+    throttle = deadzone(throttle, NEUTRAL_US, DEADZONE_US);
+    steer = deadzone(steer, NEUTRAL_US, DEADZONE_US);
 
-    int throttle_value = map(throttle, DELTA_MIN, DELTA_MAX, -127, 127);
-    int steer_value = map(steer, DELTA_MIN, DELTA_MAX, -127, 127);
+    int throttle_value = map(throttle, MIN_US, MAX_US, -127, 127);
+    int steer_value = map(steer, MIN_US, MAX_US, -127, 127);
 
     int turn_direction = steer_value < 0;
     int proportional_steer = map(steer_value, -127, 127, -throttle_value, throttle_value);
@@ -88,15 +94,15 @@ void mixer() {
     }
 
     if (turn_direction) {
-        left_speed = target_speed_inside;
-        left_direction = target_direction_inside;
-        right_speed = target_speed_outside;
-        right_direction = target_direction_outside;
+        control->left.speed = target_speed_inside;
+        control->left.direction = target_direction_inside;
+        control->right.speed = target_speed_outside;
+        control->right.direction = target_direction_outside;
     } else {
-        left_speed = target_speed_outside;
-        left_direction = target_direction_outside;
-        right_speed = target_speed_inside;
-        right_direction = target_direction_inside;
+        control->left.speed = target_speed_outside;
+        control->left.direction = target_direction_outside;
+        control->right.speed = target_speed_inside;
+        control->right.direction = target_direction_inside;
     }
 }
 
@@ -115,6 +121,8 @@ long map(long x, long in_min, long in_max, long out_min, long out_max) {
 int main() {
     bi_decl(bi_program_description("Interprets pwm signals from a radio receiver and translates them to pwm and direction signals for moto"));
     bi_decl(bi_1pin_with_name(PICO_DEFAULT_LED_PIN, "On-board LED"));
+    bi_decl(bi_2pins_with_names(GPIO_PIN_LEFT_DIR, "Skid Left Direction", GPIO_PIN_LEFT_PWM, "Skid Left PWM"));
+    bi_decl(bi_2pins_with_names(GPIO_PIN_RIGHT_PWM, "Skid Right Direction", GPIO_PIN_RIGHT_PWM, "Skid Right PWM"));
 
     stdio_init_all();
 
@@ -154,29 +162,34 @@ int main() {
     uint right_slice_num = pwm_gpio_to_slice_num(GPIO_PIN_RIGHT_PWM);
     pwm_init(right_slice_num, &left_config, false);
 
-
     pwm_set_enabled(pwm_gpio_to_slice_num(GPIO_PIN_LEFT_PWM), true);
     pwm_set_enabled(pwm_gpio_to_slice_num(GPIO_PIN_RIGHT_PWM), true);
 
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "EndlessLoop"
+    control_t control;
     for(;;) {
-        mixer();
-//        printf("targets: left speed %lu, direction %d, right speed %lu / direction %d\n",
-//               left_speed, left_direction,
-//               right_speed, right_direction);
+        mixer(throttle_pulse_us, steer_pulse_us, &control);
 
-        int left_pwm = map(left_speed, 0, 127, 0, 12499);
-        int right_pwm = map(right_speed, 0, 127, 0, 12499);
-        gpio_put(GPIO_PIN_RIGHT_DIR, right_direction);
-        gpio_put(GPIO_PIN_LEFT_DIR, left_direction);
+#ifdef PICO_DEBUG
+        printf("targets: left speed %lu, direction %d, right speed %lu / direction %d\n",
+               control.left.speed, control.left.direction,
+               control.right.speed, control.right.direction);
+#endif
+
+        int left_pwm = map(control.left.speed, 0, 127, 0, 12499);
+        int right_pwm = map(control.right.speed, 0, 127, 0, 12499);
+        gpio_put(GPIO_PIN_LEFT_DIR, control.left.direction);
+        gpio_put(GPIO_PIN_RIGHT_DIR, control.right.direction);
         pwm_set_gpio_level(GPIO_PIN_LEFT_PWM, left_pwm);
         pwm_set_gpio_level(GPIO_PIN_RIGHT_PWM, right_pwm);
 
-//        printf("control: left pwm %d, direction %d, right pwm %d / direction %d\n",
-//               left_pwm, left_direction,
-//               right_pwm, right_direction);
-
+#ifdef PICO_DEBUG
+        printf("control: left pwm %d, direction %d, right pwm %d / direction %d\n",
+               left_pwm, control.left.direction,
+               right_pwm, control.right.direction);
+#endif
+        
         sleep_ms(20);
     }
 #pragma clang diagnostic pop

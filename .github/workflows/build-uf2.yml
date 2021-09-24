@@ -14,7 +14,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -G Ninja
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Execute Ninja build    
         run: |
           cd build
