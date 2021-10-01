@@ -36,7 +36,7 @@ long deadzone(long x, long center, long width);
 #define MIN_US 1100
 #define MAX_US 1900
 #define NEUTRAL_US 1500
-#define DEADZONE_US 5
+#define DEADZONE_US 20
 
 /**
  * Callback for GPIO pin events. On rising edge the current time
@@ -80,9 +80,11 @@ void mixer(int32_t throttle_us, int32_t steer_us, control_t *control) {
     int turn_direction = steer_value < 0;
     int proportional_steer = map(steer_value, -127, 127, -throttle_value, throttle_value);
 
-//    printf("input: throttle %ld, steer %ld\n", throttle_delta, steer_delta);
-//    printf("mapped: throttle %d, steer %d\n", throttle_value, steer_value);
-//    printf("steer: proportional %d, direction %d\n", proportional_steer, turn_direction);
+#ifdef PICO_DEBUG
+    printf("input: throttle %ld, steer %ld\n", throttle_us, steer_us);
+    printf("mapped: throttle %d, steer %d\n", throttle_value, steer_value);
+    printf("steer: proportional %d, direction %d\n", proportional_steer, turn_direction);
+#endif
 
     int target_speed_outside = abs(throttle_value);
     int target_direction_outside = throttle_value < 0 ? 1 : 0;
@@ -168,6 +170,11 @@ int main() {
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "EndlessLoop"
     control_t control;
+    int left_error = 0;
+    int left_setpoint = 0;
+    int right_error = 0;
+    int right_setpoint = 0;
+
     for(;;) {
         mixer(throttle_pulse_us, steer_pulse_us, &control);
 
@@ -179,10 +186,29 @@ int main() {
 
         int left_pwm = map(control.left.speed, 0, 127, 0, 12499);
         int right_pwm = map(control.right.speed, 0, 127, 0, 12499);
-        gpio_put(GPIO_PIN_LEFT_DIR, control.left.direction);
-        gpio_put(GPIO_PIN_RIGHT_DIR, control.right.direction);
-        pwm_set_gpio_level(GPIO_PIN_LEFT_PWM, left_pwm);
-        pwm_set_gpio_level(GPIO_PIN_RIGHT_PWM, right_pwm);
+
+        left_error = (left_pwm * (control.left.direction ? 1 : -1)) - left_setpoint;
+        if (abs(left_error) > 500) {
+            left_error = 500 * (left_error < 0 ? -1 : 1);
+        }
+        left_setpoint += left_error;
+
+        right_error = (right_pwm * (control.right.direction ? 1 : -1)) - right_setpoint;
+        if (abs(right_error) > 500) {
+            right_error = 500 * (right_error < 0 ? -1 : 1);
+        }
+        right_setpoint += right_error;
+
+#ifdef PICO_DEBUG
+        printf("setpoint: left %d, error %d, right %d / error %d\n",
+               left_setpoint, left_error,
+               right_setpoint, right_error);
+#endif
+
+        gpio_put(GPIO_PIN_LEFT_DIR, left_setpoint < 0 ? 0 : 1);
+        gpio_put(GPIO_PIN_RIGHT_DIR, right_setpoint < 0 ? 0 : 1);
+        pwm_set_gpio_level(GPIO_PIN_LEFT_PWM, abs(left_setpoint) > 12400 ? 12500 : abs(left_setpoint));
+        pwm_set_gpio_level(GPIO_PIN_RIGHT_PWM, abs(right_setpoint)> 12400 ? 12500 : abs(right_setpoint));
 
 #ifdef PICO_DEBUG
         printf("control: left pwm %d, direction %d, right pwm %d / direction %d\n",
