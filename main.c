@@ -38,6 +38,8 @@ long deadzone(long x, long center, long width);
 #define NEUTRAL_US 1500
 #define DEADZONE_US 20
 
+#define PWM_WRAP 1249
+
 /**
  * Callback for GPIO pin events. On rising edge the current time
  * in microseconds is recorded. On falling edge the delta is
@@ -156,7 +158,7 @@ int main() {
     pwm_config left_config = pwm_get_default_config();
     pwm_config_set_clkdiv(&left_config, 10);
     pwm_config_set_clkdiv_mode(&left_config, PWM_DIV_FREE_RUNNING);
-    pwm_config_set_wrap(&left_config, 12499); // 125 Mhz / 10 / 12499 = 1000.08 hz
+    pwm_config_set_wrap(&left_config, PWM_WRAP); // 125 Mhz / 10 / 1249 = 10.000,08 hz
 
     uint left_slice_num = pwm_gpio_to_slice_num(GPIO_PIN_LEFT_PWM);
     pwm_init(left_slice_num, &left_config, false);
@@ -184,18 +186,18 @@ int main() {
                control.right.speed, control.right.direction);
 #endif
 
-        int left_pwm = map(control.left.speed, 0, 127, 0, 12499);
-        int right_pwm = map(control.right.speed, 0, 127, 0, 12499);
+        int left_pwm = map(control.left.speed, 0, 127, 0, PWM_WRAP);
+        int right_pwm = map(control.right.speed, 0, 127, 0, PWM_WRAP);
 
         left_error = (left_pwm * (control.left.direction ? 1 : -1)) - left_setpoint;
-        if (abs(left_error) > 500) {
-            left_error = 500 * (left_error < 0 ? -1 : 1);
+        if (abs(left_error) > 50) {
+            left_error = 50 * (left_error < 0 ? -1 : 1);
         }
         left_setpoint += left_error;
 
         right_error = (right_pwm * (control.right.direction ? 1 : -1)) - right_setpoint;
-        if (abs(right_error) > 500) {
-            right_error = 500 * (right_error < 0 ? -1 : 1);
+        if (abs(right_error) > 50) {
+            right_error = 50 * (right_error < 0 ? -1 : 1);
         }
         right_setpoint += right_error;
 
@@ -207,8 +209,8 @@ int main() {
 
         gpio_put(GPIO_PIN_LEFT_DIR, left_setpoint < 0 ? 0 : 1);
         gpio_put(GPIO_PIN_RIGHT_DIR, right_setpoint < 0 ? 0 : 1);
-        pwm_set_gpio_level(GPIO_PIN_LEFT_PWM, abs(left_setpoint) > 12400 ? 12500 : abs(left_setpoint));
-        pwm_set_gpio_level(GPIO_PIN_RIGHT_PWM, abs(right_setpoint)> 12400 ? 12500 : abs(right_setpoint));
+        pwm_set_gpio_level(GPIO_PIN_LEFT_PWM, abs(left_setpoint) > 1240 ? 1250 : abs(left_setpoint));
+        pwm_set_gpio_level(GPIO_PIN_RIGHT_PWM, abs(right_setpoint)> 1240 ? 1250 : abs(right_setpoint));
 
 #ifdef PICO_DEBUG
         printf("control: left pwm %d, direction %d, right pwm %d / direction %d\n",
