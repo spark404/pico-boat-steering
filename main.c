@@ -5,6 +5,8 @@
 #include "pico/binary_info.h"
 
 #include "hardware/pwm.h"
+#include "hardware/adc.h"
+#include "hardware/irq.h"
 
 volatile uint64_t steer_pulse_start = 0;
 volatile int32_t steer_pulse_us = 0;
@@ -25,12 +27,14 @@ long constrain(long x, long min, long max);
 long map(long x, long in_min, long in_max, long out_min, long out_max);
 long deadzone(long x, long center, long width);
 
-#define GPIO_STEER 18
-#define GPIO_THROTTLE 19
+#define GPIO_PIN_STEER 18
+#define GPIO_PIN_THROTTLE 19
 #define GPIO_PIN_LEFT_PWM 10
 #define GPIO_PIN_LEFT_DIR 11
 #define GPIO_PIN_RIGHT_PWM 12
 #define GPIO_PIN_RIGHT_DIR 13
+#define GPIO_PIN_LEFT_CS 26
+#define GPIO_PIN_RIGHT_CS 27
 
 // Typical settings for Spektrum servo pulse width in microseconds
 #define MIN_US 1100
@@ -49,7 +53,7 @@ long deadzone(long x, long center, long width);
  * @param event
  */
 void gpio_callback(uint gpio, uint32_t event) {
-    if (gpio == GPIO_THROTTLE) {
+    if (gpio == GPIO_PIN_THROTTLE) {
         if (event == GPIO_IRQ_EDGE_RISE) {
             throttle_pulse_start = time_us_64();
         } else {
@@ -62,6 +66,23 @@ void gpio_callback(uint gpio, uint32_t event) {
             steer_pulse_us = (int32_t)(time_us_64() - steer_pulse_start);
         }
     }
+}
+
+volatile uint16_t current_left[3];
+volatile uint16_t current_right[3];
+const double alpha = 0.7f;
+/**
+ * Interrupt service routine for the ADC interrupt
+ * Uses basic low-pass filter to smooth the input.
+ */
+void adc_isr(void) {
+    current_left[2] = current_left[1];
+    current_left[1] = adc_fifo_get();
+    current_left[0] = alpha * current_left[2] + (1 - alpha) * current_left[1];
+
+    current_right[2] = current_right[1];
+    current_right[1] = adc_fifo_get();
+    current_right[0] = alpha * current_right[2] + (1 - alpha) * current_right[1];
 }
 
 /**
@@ -125,8 +146,10 @@ long map(long x, long in_min, long in_max, long out_min, long out_max) {
 int main() {
     bi_decl(bi_program_description("Interprets pwm signals from a radio receiver and translates them to pwm and direction signals for moto"));
     bi_decl(bi_1pin_with_name(PICO_DEFAULT_LED_PIN, "On-board LED"));
+    bi_decl(bi_2pins_with_names(GPIO_PIN_STEER, "Steer Input", GPIO_PIN_THROTTLE, "Throttle Input"));
     bi_decl(bi_2pins_with_names(GPIO_PIN_LEFT_DIR, "Skid Left Direction", GPIO_PIN_LEFT_PWM, "Skid Left PWM"));
     bi_decl(bi_2pins_with_names(GPIO_PIN_RIGHT_PWM, "Skid Right Direction", GPIO_PIN_RIGHT_PWM, "Skid Right PWM"));
+    bi_decl(bi_2pins_with_names(GPIO_PIN_LEFT_CS, "CurrentSense Input Left", GPIO_PIN_RIGHT_CS, "CurrentSense Input Right"));
 
     stdio_init_all();
 
@@ -136,15 +159,15 @@ int main() {
     gpio_put(PICO_DEFAULT_LED_PIN, true);
 
     // Init the servo inputs
-    gpio_init(GPIO_STEER);
-    gpio_set_dir(GPIO_STEER, false);
-    gpio_pull_down(GPIO_STEER);
-    gpio_set_irq_enabled_with_callback(GPIO_STEER, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+    gpio_init(GPIO_PIN_STEER);
+    gpio_set_dir(GPIO_PIN_STEER, false);
+    gpio_pull_down(GPIO_PIN_STEER);
+    gpio_set_irq_enabled_with_callback(GPIO_PIN_STEER, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
 
-    gpio_init(GPIO_THROTTLE);
-    gpio_set_dir(GPIO_THROTTLE, false);
-    gpio_pull_down(GPIO_THROTTLE);
-    gpio_set_irq_enabled(GPIO_THROTTLE, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_init(GPIO_PIN_THROTTLE);
+    gpio_set_dir(GPIO_PIN_THROTTLE, false);
+    gpio_pull_down(GPIO_PIN_THROTTLE);
+    gpio_set_irq_enabled(GPIO_PIN_THROTTLE, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
 
     // Configure the output pins
     gpio_init(GPIO_PIN_LEFT_DIR);
@@ -169,12 +192,32 @@ int main() {
     pwm_set_enabled(pwm_gpio_to_slice_num(GPIO_PIN_LEFT_PWM), true);
     pwm_set_enabled(pwm_gpio_to_slice_num(GPIO_PIN_RIGHT_PWM), true);
 
+    // Enable the ADC IRQ and handler
+    irq_set_exclusive_handler(ADC_IRQ_FIFO, &adc_isr);
+    irq_set_enabled(ADC_IRQ_FIFO, true);
+
+    // Configure the ADC to measure current of the drivers
+    adc_init();
+    adc_set_clkdiv(200000); // 48Mhz / 200.000 = 240Hz
+
+    adc_gpio_init(GPIO_PIN_LEFT_CS);
+    adc_gpio_init(GPIO_PIN_RIGHT_CS);
+
+    adc_select_input(0);
+    adc_select_input(1);
+
+    adc_set_round_robin(1 | (1 << 2));
+    adc_fifo_setup(true, false, 2, true, false);
+
+    adc_irq_set_enabled(true);
+    adc_run(true);
+
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "EndlessLoop"
     control_t control;
-    int left_error = 0;
+    int left_error;
     int left_setpoint = 0;
-    int right_error = 0;
+    int right_error;
     int right_setpoint = 0;
 
     for(;;) {
@@ -217,7 +260,14 @@ int main() {
                left_pwm, control.left.direction,
                right_pwm, control.right.direction);
 #endif
-        
+
+#ifdef PICO_DEBUG
+        const float conversion_factor = 3.3f / (1 << 12);
+        printf("L: Raw value: 0x%03x, voltage: %6.4f, measured: % 6.2f A\n", current_left[0], current_left[0] * conversion_factor, ((current_left[0] * conversion_factor) - 0.050) / 0.020 );
+        printf("R: Raw value: 0x%03x, voltage: %6.4f, measured: % 6.2f A\n", current_right[0], current_right[0] * conversion_factor, ((current_right[0] * conversion_factor) - 0.050) / 0.020 );
+        printf("\033[8A");
+#endif
+
         sleep_ms(20);
     }
 #pragma clang diagnostic pop

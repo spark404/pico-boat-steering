@@ -22,6 +22,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         pico_stdlib
         hardware_pio
         hardware_pwm
+        hardware_adc
         )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
