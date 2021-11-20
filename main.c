@@ -229,18 +229,20 @@ int main() {
                control.right.speed, control.right.direction);
 #endif
 
-        int left_pwm = map(control.left.speed, 0, 127, 0, PWM_WRAP);
-        int right_pwm = map(control.right.speed, 0, 127, 0, PWM_WRAP);
+        int left_pwm = map(control.left.speed, 0, 255, 0, PWM_WRAP);
+        int right_pwm = map(control.right.speed, 0, 255, 0, PWM_WRAP);
+
+        int error_limit = 25;
 
         left_error = (left_pwm * (control.left.direction ? 1 : -1)) - left_setpoint;
-        if (abs(left_error) > 50) {
-            left_error = 50 * (left_error < 0 ? -1 : 1);
+        if (abs(left_error) > error_limit) {
+            left_error = error_limit * (left_error < 0 ? -1 : 1);
         }
         left_setpoint += left_error;
 
         right_error = (right_pwm * (control.right.direction ? 1 : -1)) - right_setpoint;
-        if (abs(right_error) > 50) {
-            right_error = 50 * (right_error < 0 ? -1 : 1);
+        if (abs(right_error) > error_limit) {
+            right_error = error_limit * (right_error < 0 ? -1 : 1);
         }
         right_setpoint += right_error;
 
